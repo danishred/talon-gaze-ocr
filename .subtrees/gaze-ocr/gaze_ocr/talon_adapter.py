@@ -18,6 +18,12 @@ class Mouse:
     def click(self):
         actions.mouse_click()
 
+    def press(self, button: int = 0):
+        actions.mouse_drag(button)
+
+    def release(self, button: int = 0):
+        actions.mouse_release(button)
+
 
 class Keyboard:
     def __init__(self):

@@ -50,6 +50,13 @@ class CursorLocation:
         offset = self.click_offset_right() if self.click_offset_right else 0
         return (self.base_coordinates[0] + offset, self.base_coordinates[1])
 
+    def _focus_and_get_visual_coordinates(self) -> tuple[int, int]:
+        """Focus window and return visual coordinates with offset applied."""
+        if self.app_actions:
+            self.app_actions.focus_at(*self.base_coordinates)
+        offset = self.click_offset_right() if self.click_offset_right else 0
+        return (self.visual_coordinates[0] + offset, self.visual_coordinates[1])
+
     def move_mouse_cursor(self):
         final_coordinates = self._focus_and_get_final_coordinates()
         self.mouse.move(final_coordinates)
@@ -707,6 +714,7 @@ class Controller:
         click_offset_right: Adjust the X-coordinate when clicking.
         after_start: If true, begin selection after the start word.
         before_end: If true, end selection before the end word.
+        selection_mode: Selection method ('drag' or 'shift_click').
         """
         return self._extract_result(
             self.select_text_generator(
@@ -719,8 +727,34 @@ class Controller:
                 click_offset_right=click_offset_right,
                 after_start=after_start,
                 before_end=before_end,
+                select_pause_seconds=select_pause_seconds,
+                selection_mode=selection_mode,
             )
         )
+
+    def _drag_select(
+        self,
+        start_location: CursorLocation,
+        end_location: CursorLocation,
+        select_pause_seconds: Callable[[], float] | float = 0.03,
+    ):
+        pause = min(0.05, max(0.02, self._resolve_value(select_pause_seconds)))
+        start_coords = start_location._focus_and_get_visual_coordinates()
+        end_coords = end_location._focus_and_get_visual_coordinates()
+        self.mouse.move(start_coords)
+        time.sleep(pause)
+        if hasattr(self.mouse, "press"):
+            self.mouse.press(0)
+        else:
+            self.mouse.click()
+            return
+        try:
+            time.sleep(pause)
+            self.mouse.move(end_coords)
+            time.sleep(pause)
+        finally:
+            if hasattr(self.mouse, "release"):
+                self.mouse.release(0)
 
     def select_text_generator(
         self,
@@ -734,6 +768,7 @@ class Controller:
         after_start: bool = False,
         before_end: bool = False,
         select_pause_seconds: Callable[[], float] | float = 0.01,
+        selection_mode: Callable[[], str] | str = "drag",
     ) -> Generator[Sequence[CursorLocation], CursorLocation, CursorLocation | None]:
         """Same as select_text, except it supports disambiguation through a generator.
         See header comment for details.
@@ -755,44 +790,84 @@ class Controller:
         )
         if not start_location:
             return None
-        start_location.move_text_cursor()
-        time.sleep(self._resolve_value(select_pause_seconds))
-        if end_words:
 
-            def filter_function(location):
-                return self._is_valid_selection(
-                    start_location.base_coordinates, location[-1].end_coordinates
-                )
+        is_drag = "drag" in str(self._resolve_value(selection_mode)).lower()
+        if is_drag:
+            if end_words:
+                def filter_function(location):
+                    return self._is_valid_selection(
+                        start_location.base_coordinates, location[-1].end_coordinates
+                    )
 
-            return (
-                yield from self.move_text_cursor_to_words_generator(
-                    end_words,
-                    disambiguate=disambiguate,
+                screen_contents_end = self.read_nearby(end_time_range)
+                matches_end = screen_contents_end.find_matching_words(end_words)
+                if filter_function:
+                    matches_end = list(filter(filter_function, matches_end))
+                self._write_data(screen_contents_end, end_words, matches_end)
+                locations_end = self._plan_cursor_locations(
+                    matches_end,
                     cursor_position="before" if before_end else "after",
-                    filter_location_function=filter_function,
                     include_whitespace=False,
-                    time_range=end_time_range,
                     click_offset_right=click_offset_right,
-                    hold_shift=True,
                     selection_position=self.SelectionPosition.RIGHT,
                 )
-            )
-        else:
-            # Select until the end of the start_words match.
-            end_match = start_matches[start_locations.index(start_location)]
-            end_location = self._plan_cursor_location(
-                end_match,
-                cursor_position="before" if before_end else "after",
-                include_whitespace=False,
-                click_offset_right=click_offset_right,
-                selection_position=self.SelectionPosition.RIGHT,
-            )
-            self.keyboard.shift_down()
-            try:
-                end_location.move_text_cursor()
-            finally:
-                self.keyboard.shift_up()
+                end_location = yield from self._choose_cursor_location(
+                    disambiguate=disambiguate,
+                    matches=locations_end,
+                    screen_contents=screen_contents_end,
+                )
+                if not end_location:
+                    return None
+            else:
+                end_match = start_matches[start_locations.index(start_location)]
+                end_location = self._plan_cursor_location(
+                    end_match,
+                    cursor_position="before" if before_end else "after",
+                    include_whitespace=False,
+                    click_offset_right=click_offset_right,
+                    selection_position=self.SelectionPosition.RIGHT,
+                )
+            self._drag_select(start_location, end_location, select_pause_seconds)
             return end_location
+        else:
+            start_location.move_text_cursor()
+            time.sleep(self._resolve_value(select_pause_seconds))
+            if end_words:
+
+                def filter_function(location):
+                    return self._is_valid_selection(
+                        start_location.base_coordinates, location[-1].end_coordinates
+                    )
+
+                return (
+                    yield from self.move_text_cursor_to_words_generator(
+                        end_words,
+                        disambiguate=disambiguate,
+                        cursor_position="before" if before_end else "after",
+                        filter_location_function=filter_function,
+                        include_whitespace=False,
+                        time_range=end_time_range,
+                        click_offset_right=click_offset_right,
+                        hold_shift=True,
+                        selection_position=self.SelectionPosition.RIGHT,
+                    )
+                )
+            else:
+                # Select until the end of the start_words match.
+                end_match = start_matches[start_locations.index(start_location)]
+                end_location = self._plan_cursor_location(
+                    end_match,
+                    cursor_position="before" if before_end else "after",
+                    include_whitespace=False,
+                    click_offset_right=click_offset_right,
+                    selection_position=self.SelectionPosition.RIGHT,
+                )
+                self.keyboard.shift_down()
+                try:
+                    end_location.move_text_cursor()
+                finally:
+                    self.keyboard.shift_up()
+                return end_location
 
     def select_matching_text(
         self,

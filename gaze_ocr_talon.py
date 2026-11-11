@@ -87,6 +87,12 @@ mod.setting(
     desc="Adjust the pause between clicks when performing a selection.",
 )
 mod.setting(
+    "ocr_selection_mode",
+    type=str,
+    default="drag",
+    desc="Selection method: 'drag' (click and drag) or 'shift_click' (Shift-Click).",
+)
+mod.setting(
     "ocr_use_window_at_api",
     type=bool,
     default=False,
@@ -1050,6 +1056,7 @@ def select_text_generator(
         after_start=after_start,
         before_end=before_end,
         select_pause_seconds=lambda: settings.get("user.ocr_select_pause_seconds"),
+        selection_mode=lambda: settings.get("user.ocr_selection_mode"),
     )
     if not result:
         actions.user.show_ocr_overlay_for_query(
